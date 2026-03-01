@@ -14,7 +14,7 @@ PYTHON_TX_PORT = 5006  # Unity 'Recv Port'
 # Initialize vehicle(s)
 min_angle: float = -np.pi / 2.0  # radians
 max_angle: float = np.pi / 2.0  # radians
-bubble_size: float = 120  # lidar points
+bubble_size: float = 160  # lidar points
 
 def index_to_angle(index: int, num_points: int) -> float:
     angle_increment = (max_angle - min_angle) / (num_points - 1)
@@ -38,9 +38,9 @@ def find_best_point(lidar_range_array: np.ndarray[Any]) -> int:
 
 
 def compute_speed(target_distance: float) -> float:
-    if target_distance < 6.0:
-        return target_distance / 6.0
-    return 1.0
+    if target_distance < 5.0:
+        return target_distance / 50.0
+    return 0.125
 
 def main():
     # Initialize the bridge
@@ -75,7 +75,7 @@ def main():
                 throttle = compute_speed(target_distance)
 
                 # 5. Heartbeat: Send neutral controls so Unity keeps the socket open
-                bridge.send_control(-steering, 0.08)
+                bridge.send_control(-steering, throttle)
 
             # Run at roughly 50Hz
             time.sleep(0.02)

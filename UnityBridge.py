@@ -4,7 +4,7 @@ import time
 import threading
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Tuple
+from typing import Tuple, Optional
 
 class VehicleStatus(IntEnum):
     OK = 0
@@ -12,6 +12,7 @@ class VehicleStatus(IntEnum):
 
 @dataclass
 class TelemetryData:
+    sequenceId: int = 0
     timeSinceStart: float = 0.0
     fixedDeltaTime: float = 0.0
     speedMS: float = 0.0
@@ -36,85 +37,116 @@ class UnityTelemetryBridge:
         self.tx_port = tx_port
         self.lidar_max_dist = lidar_max_dist
         
-        # 6f (system) + 1i (ticks) + 1f (rpm) + 9f (vectors) + 1f (reward) + 3i (lap, crash, lidar)
-        self.header_format = '<6fif10f3i' 
-        self.header_size = 84
+        # --- FORMAT STRING (88 Bytes) ---
+        # < : Little Endian
+        # I : Sequence ID (1 uint)
+        # 6f: time, dt, speed, steer, steerRad, throttle (6 floats)
+        # i : wheelTicks (1 int)
+        # f : wheelRPM (1 float)
+        # 9f: imuAngle(3), linAccel(3), angAccel(3) (9 floats)
+        # f : reward (1 float)
+        # 3i: lapCount, isCrashed, lidarCount (3 ints)
+        self.header_format = '<I6fi f9f f3i' 
+        self.header_size = struct.calcsize(self.header_format)
         
+        # Networking
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Bind to 0.0.0.0 to ensure it listens on all interfaces
         self.sock.bind((self.ip, self.rx_port))
         
         self.unity_address = (self.ip, self.tx_port)
+        
+        # State Tracking
         self.latest_data = TelemetryData()
+        self.last_sequence_id = -1
         self.running = False
         self._lock = threading.Lock()
 
     def start(self):
+        """Starts the background listener thread."""
         self.running = True
         self.thread = threading.Thread(target=self._listen_loop, daemon=True)
         self.thread.start()
+        print(f"✅ Bridge started. Listening on :{self.rx_port}, Sending to {self.ip}:{self.tx_port}")
 
     def _listen_loop(self):
         while self.running:
             try:
                 data, _ = self.sock.recvfrom(65535)
-                if len(data) >= self.header_size:
-                    # 1. Unpack fixed-size header
-                    h = struct.unpack(self.header_format, data[:self.header_size])
-                    
-                    lidar_n = h[20]
-                    ranges = []
-                    
-                    # 2. Extract Lidar array if points exist
-                    if lidar_n > 0:
-                        payload_offset = self.header_size
-                        total_len = payload_offset + (lidar_n * 2)
-                        
-                        if len(data) >= total_len:
-                            # Unpack N unsigned shorts (H) from the lidar payload section
-                            # '<' Little Endian, '{lidar_n}H' repeat H for lidar_n times
-                            raw_lidar = struct.unpack(f'<{lidar_n}H', data[payload_offset:total_len])
-                            
-                            # Convert quantized ushorts back to meters
-                            # (val / 65535.0) scales to 0.0-1.0, then multiply by max distance
-                            ranges = [(v / 65535.0) * self.lidar_max_dist for v in raw_lidar]
+                
+                if len(data) < self.header_size:
+                    # Ignore packets that don't meet minimum header size
+                    continue
 
-                    # 3. Thread-safe update of the data object
-                    with self._lock:
-                        self.latest_data = TelemetryData(
-                            timeSinceStart=h[0],
-                            fixedDeltaTime=h[1],
-                            speedMS=h[2],
-                            steering=h[3],
-                            steeringAngleRad=h[4],
-                            throttle=h[5],
-                            wheelTicks=h[6],
-                            currentWheelRPM=h[7],
-                            imuAngle=(h[8], h[9], h[10]),
-                            linAccel=(h[11], h[12], h[13]),
-                            angAccel=(h[14], h[15], h[16]),
-                            reward=h[17],
-                            lapCount=h[18],
-                            isCrashed=VehicleStatus(h[19]),
-                            lidarCount=lidar_n,
-                            lidarRanges=ranges
-                        )
+                # 1. Unpack fixed-size header
+                h = struct.unpack(self.header_format, data[:self.header_size])
+                
+                # 2. Sequence Check (Drop old/duplicate packets)
+                seq_id = h[0]
+                if self.last_sequence_id != -1:
+                    if seq_id <= self.last_sequence_id:
+                        continue
+                    if seq_id > self.last_sequence_id + 1:
+                        lost = seq_id - self.last_sequence_id - 1
+                        print(f"⚠️ Packet Loss Warning: Skipped {lost} frames. (Current Seq: {seq_id})")
+                
+                self.last_sequence_id = seq_id
+
+                # 3. Extract Lidar (if points exist)
+                lidar_n = h[21]
+                ranges = []
+                if lidar_n > 0:
+                    payload_offset = self.header_size
+                    total_len = payload_offset + (lidar_n * 2)
+                    
+                    if len(data) >= total_len:
+                        raw_lidar = struct.unpack(f'<{lidar_n}H', data[payload_offset:total_len])
+                        ranges = [(v / 65535.0) * self.lidar_max_dist for v in raw_lidar]
+                    else:
+                        print(f"❌ Lidar Payload Error: Expected {lidar_n} points, but packet too small.")
+
+                # 4. Thread-safe Update
+                with self._lock:
+                    self.latest_data = TelemetryData(
+                        sequenceId       = h[0],
+                        timeSinceStart   = h[1],
+                        fixedDeltaTime   = h[2],
+                        speedMS          = h[3],
+                        steering         = h[4],
+                        steeringAngleRad = h[5],
+                        throttle         = h[6],
+                        wheelTicks       = h[7],
+                        currentWheelRPM  = h[8],
+                        imuAngle         = (h[9], h[10], h[11]),
+                        linAccel         = (h[12], h[13], h[14]),
+                        angAccel         = (h[15], h[16], h[17]),
+                        reward           = h[18],
+                        lapCount         = h[19],
+                        isCrashed        = VehicleStatus(h[20]),
+                        lidarCount       = lidar_n,
+                        lidarRanges      = ranges
+                    )
+
             except Exception as e:
                 if self.running:
-                    print(f"Bridge Error: {e}")
-                    time.sleep(1)
+                    print(f"🚨 Bridge Error: {e}")
 
     def get_telemetry(self) -> TelemetryData:
+        """Returns the most recent telemetry data received."""
         with self._lock:
             return self.latest_data
 
     def send_control(self, steering: float, throttle: float):
+        """Sends steering and throttle commands to Unity."""
         try:
             pkt = struct.pack('<ff', float(steering), float(throttle))
             self.sock.sendto(pkt, self.unity_address)
         except Exception as e:
-            print(f"Send Error: {e}")
+            print(f"❌ Send Error: {e}")
 
     def stop(self):
+        """Cleanly shuts down the bridge."""
         self.running = False
         self.sock.close()
+        print("🛑 Bridge stopped.")

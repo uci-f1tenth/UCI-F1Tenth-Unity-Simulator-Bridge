@@ -13,7 +13,7 @@ def main():
         "MlpPolicy",
         env,
         learning_rate=0.0003,
-        n_steps=2048,
+        n_steps=1024,
         batch_size=128,
         n_epochs=10,
         gamma=0.99,
@@ -26,7 +26,7 @@ def main():
     try:
         # Start learning
         model.learn(
-            total_timesteps=100_000,
+            total_timesteps=500_000,
             tb_log_name="PPO_Baseline_Run",
             reset_num_timesteps=False
         )

@@ -1,5 +1,6 @@
 import socket
 import struct
+import time
 import threading
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -11,22 +12,22 @@ class VehicleStatus(IntEnum):
 
 @dataclass
 class TelemetryData:
-    time: float = 0.0
-    dt: float = 0.0
-    speed: float = 0.0
-    steer_cmd: float = 0.0
-    steer_phys: float = 0.0
+    timeSinceStart: float = 0.0
+    fixedDeltaTime: float = 0.0
+    speedMS: float = 0.0
+    steering: float = 0.0
+    steeringAngleRad: float = 0.0
     throttle: float = 0.0
-    ticks: int = 0
-    rpm: float = 0.0
-    euler: Tuple[float, float, float] = (0, 0, 0)
-    lin_accel: Tuple[float, float, float] = (0, 0, 0)
-    ang_accel: Tuple[float, float, float] = (0, 0, 0)
+    wheelTicks: int = 0
+    currentWheelRPM: float = 0.0
+    imuAngle: Tuple[float, float, float] = (0, 0, 0)
+    linAccel: Tuple[float, float, float] = (0, 0, 0)
+    angAccel: Tuple[float, float, float] = (0, 0, 0)
     reward: float = 0.0
-    lap_count: int = 0
-    status: VehicleStatus = VehicleStatus.OK
-    lidar_count: int = 0
-    lidar_ranges: list[float] = field(default_factory=list)
+    lapCount: int = 0
+    isCrashed: VehicleStatus = VehicleStatus.OK
+    lidarCount: int = 0
+    lidarRanges: list[float] = field(default_factory=list)
 
 class UnityTelemetryBridge:
     def __init__(self, ip="127.0.0.1", rx_port=5005, tx_port=5006, lidar_max_dist=20.0):
@@ -81,20 +82,27 @@ class UnityTelemetryBridge:
                     # 3. Thread-safe update of the data object
                     with self._lock:
                         self.latest_data = TelemetryData(
-                            time=h[0], dt=h[1], speed=h[2],
-                            steer_cmd=h[3], steer_phys=h[4], throttle=h[5],
-                            ticks=h[6], rpm=h[7],
-                            euler=(h[8], h[9], h[10]),
-                            lin_accel=(h[11], h[12], h[13]),
-                            ang_accel=(h[14], h[15], h[16]),
+                            timeSinceStart=h[0],
+                            fixedDeltaTime=h[1],
+                            speedMS=h[2],
+                            steering=h[3],
+                            steeringAngleRad=h[4],
+                            throttle=h[5],
+                            wheelTicks=h[6],
+                            currentWheelRPM=h[7],
+                            imuAngle=(h[8], h[9], h[10]),
+                            linAccel=(h[11], h[12], h[13]),
+                            angAccel=(h[14], h[15], h[16]),
                             reward=h[17],
-                            lap_count=h[18],
-                            status=VehicleStatus(h[19]),
-                            lidar_count=lidar_n,
-                            lidar_ranges=ranges
+                            lapCount=h[18],
+                            isCrashed=VehicleStatus(h[19]),
+                            lidarCount=lidar_n,
+                            lidarRanges=ranges
                         )
             except Exception as e:
-                if self.running: print(f"Bridge Error: {e}")
+                if self.running:
+                    print(f"Bridge Error: {e}")
+                    time.sleep(1)
 
     def get_telemetry(self) -> TelemetryData:
         with self._lock:

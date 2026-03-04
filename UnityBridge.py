@@ -30,83 +30,111 @@ class TelemetryData:
     lidarCount: int = 0
     lidarRanges: list[float] = field(default_factory=list)
 
-class UnityTelemetryBridge:
-    def __init__(self, ip="127.0.0.1", rx_port=5005, tx_port=5006, lidar_max_dist=20.0):
+class UnityTCPBridge:
+    def __init__(self, ip="127.0.0.1", port=5005, lidar_max_dist=20.0):
         self.ip = ip
-        self.rx_port = rx_port
-        self.tx_port = tx_port
+        self.port = port
         self.lidar_max_dist = lidar_max_dist
         
         # --- FORMAT STRING (88 Bytes) ---
-        # < : Little Endian
-        # I : Sequence ID (1 uint)
-        # 6f: time, dt, speed, steer, steerRad, throttle (6 floats)
-        # i : wheelTicks (1 int)
-        # f : wheelRPM (1 float)
-        # 9f: imuAngle(3), linAccel(3), angAccel(3) (9 floats)
-        # f : reward (1 float)
-        # 3i: lapCount, isCrashed, lidarCount (3 ints)
+        # Same structure as before
         self.header_format = '<I6fi f9f f3i' 
         self.header_size = struct.calcsize(self.header_format)
-        
-        # Networking
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Bind to 0.0.0.0 to ensure it listens on all interfaces
-        self.sock.bind((self.ip, self.rx_port))
-        
-        self.unity_address = (self.ip, self.tx_port)
         
         # State Tracking
         self.latest_data = TelemetryData()
         self.last_sequence_id = -1
         self.running = False
+        self.connected = False
         self._lock = threading.Lock()
+        
+        self.sock = None
 
     def start(self):
-        """Starts the background listener thread."""
+        """Starts the connection and the listener thread."""
         self.running = True
-        self.thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self.thread = threading.Thread(target=self._connection_loop, daemon=True)
         self.thread.start()
-        print(f"✅ Bridge started. Listening on :{self.rx_port}, Sending to {self.ip}:{self.tx_port}")
+        print(f"🔄 Bridge starting... Connecting to {self.ip}:{self.port}")
 
-    def _listen_loop(self):
+    def _connection_loop(self):
+        """
+        Main Loop: Tries to connect, then runs the listen loop.
+        If disconnected, it goes back to trying to connect.
+        """
         while self.running:
             try:
-                data, _ = self.sock.recvfrom(65535)
+                # 1. Create TCP Socket
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) # Critical for latency
                 
-                if len(data) < self.header_size:
-                    # Ignore packets that don't meet minimum header size
-                    continue
+                # 2. Try Connect
+                print(f"⏳ Attempting to connect to Unity at {self.ip}:{self.port}...")
+                self.sock.connect((self.ip, self.port))
+                
+                self.connected = True
+                self.last_sequence_id = -1 # Reset sequence tracking on new connection
+                print("✅ Connected to Unity!")
+                
+                # 3. Enter Receive Loop
+                self._listen_loop()
+                
+            except ConnectionRefusedError:
+                time.sleep(1) # Unity probably isn't running, retry
+            except Exception as e:
+                print(f"❌ Connection Error: {e}")
+                time.sleep(1)
+            finally:
+                self.connected = False
+                if self.sock:
+                    self.sock.close()
 
-                # 1. Unpack fixed-size header
-                h = struct.unpack(self.header_format, data[:self.header_size])
+    def _recv_exact(self, n):
+        """Helper to read exactly n bytes from the TCP stream."""
+        data = bytearray()
+        while len(data) < n:
+            packet = self.sock.recv(n - len(data))
+            if not packet:
+                raise ConnectionError("Socket closed")
+            data.extend(packet)
+        return data
+
+    def _listen_loop(self):
+        """Reads data from the open socket."""
+        while self.running and self.connected:
+            try:
+                # 1. Read Fixed Header (88 bytes)
+                # We use _recv_exact because TCP might give us partial packets
+                header_data = self._recv_exact(self.header_size)
                 
-                # 2. Sequence Check (Drop old/duplicate packets)
+                # Unpack
+                h = struct.unpack(self.header_format, header_data)
+                
+                # 2. Sequence Check
                 seq_id = h[0]
                 if self.last_sequence_id != -1:
                     if seq_id <= self.last_sequence_id:
                         continue
+                    # Only warn if we've already received at least one packet this session
                     if seq_id > self.last_sequence_id + 1:
-                        lost = seq_id - self.last_sequence_id - 1
-                        print(f"⚠️ Packet Loss Warning: Skipped {lost} frames. (Current Seq: {seq_id})")
-                
+                        print(f"⚠️ Gap detected...")
+                else:
+                    print(f"📈 First packet received. Syncing Sequence at: {seq_id}")
+
                 self.last_sequence_id = seq_id
 
-                # 3. Extract Lidar (if points exist)
+                # 3. Read Lidar Payload
                 lidar_n = h[21]
                 ranges = []
+                
                 if lidar_n > 0:
-                    payload_offset = self.header_size
-                    total_len = payload_offset + (lidar_n * 2)
+                    lidar_bytes_needed = lidar_n * 2
+                    lidar_data = self._recv_exact(lidar_bytes_needed)
                     
-                    if len(data) >= total_len:
-                        raw_lidar = struct.unpack(f'<{lidar_n}H', data[payload_offset:total_len])
-                        ranges = [(v / 65535.0) * self.lidar_max_dist for v in raw_lidar]
-                    else:
-                        print(f"❌ Lidar Payload Error: Expected {lidar_n} points, but packet too small.")
+                    raw_lidar = struct.unpack(f'<{lidar_n}H', lidar_data)
+                    ranges = [(v / 65535.0) * self.lidar_max_dist for v in raw_lidar]
 
-                # 4. Thread-safe Update
+                # 4. Update State
                 with self._lock:
                     self.latest_data = TelemetryData(
                         sequenceId       = h[0],
@@ -128,25 +156,94 @@ class UnityTelemetryBridge:
                         lidarRanges      = ranges
                     )
 
+            except (ConnectionError, struct.error, OSError):
+                print("🔌 Disconnected from Unity.")
+                break # Exit to outer loop to reconnect
             except Exception as e:
-                if self.running:
-                    print(f"🚨 Bridge Error: {e}")
+                print(f"🚨 Parse Error: {e}")
+                break
 
     def get_telemetry(self) -> TelemetryData:
-        """Returns the most recent telemetry data received."""
         with self._lock:
             return self.latest_data
 
     def send_control(self, steering: float, throttle: float):
-        """Sends steering and throttle commands to Unity."""
+        if not self.connected or not self.sock:
+            return
+            
         try:
+            # 8 bytes (2 floats)
             pkt = struct.pack('<ff', float(steering), float(throttle))
-            self.sock.sendto(pkt, self.unity_address)
+            self.sock.sendall(pkt) # sendall ensures all bytes go out
         except Exception as e:
             print(f"❌ Send Error: {e}")
+            self.connected = False
+
+    def step(self, steering: float, throttle: float, timeout=1.0) -> TelemetryData:
+        """
+        Sends command and blocks until the next physics frame arrives.
+        """
+        if not self.connected:
+            # Wait a bit if not connected yet to avoid crashing the training loop
+            time.sleep(0.1)
+            return self.get_telemetry()
+
+        prev_id = self.last_sequence_id
+        self.send_control(steering, throttle)
+        
+        start_t = time.time()
+        while self.last_sequence_id == prev_id:
+            if time.time() - start_t > timeout:
+                print("⏲️ Step Timeout: Unity didn't respond.")
+                break
+            time.sleep(0.001)
+            
+        return self.get_telemetry()
 
     def stop(self):
-        """Cleanly shuts down the bridge."""
         self.running = False
-        self.sock.close()
+        if self.sock:
+            self.sock.close()
         print("🛑 Bridge stopped.")
+
+# --- TEST USAGE ---
+import time
+
+if __name__ == "__main__":
+    bridge = UnityTCPBridge(port=5005)
+    bridge.start()
+    
+    # Tracking variables for UPS
+    ups_counter = 0
+    last_time = time.time()
+    
+    try:
+        while True:
+            # Step the simulation
+            obs = bridge.step(0.0, 0.5)
+            ups_counter += 1
+            
+            # --- STATUS UPDATE (Every 1 Second) ---
+            current_time = time.time()
+            if current_time - last_time >= 1.0:
+                # Calculate frequency
+                ups = ups_counter / (current_time - last_time)
+                
+                # Print stats
+                if bridge.connected:
+                    print(f"📊 [UPS: {ups:5.1f}] | Seq: {obs.sequenceId:6d} | Speed: {obs.speedMS:5.2f} m/s | Rew: {obs.reward:6.2f}")
+                else:
+                    print("📊 Waiting for Unity connection...")
+                
+                # Reset counters
+                ups_counter = 0
+                last_time = current_time
+
+            # --- GAME LOGIC ---
+            if obs.isCrashed == VehicleStatus.CRASHED:
+                print("💥 Crash Detected! Sending reset signal...")
+                # We still step here, which will be counted in the next second's UPS
+                bridge.step(100.0, 100.0) 
+            
+    except KeyboardInterrupt:
+        bridge.stop()

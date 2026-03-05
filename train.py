@@ -15,12 +15,12 @@ def main():
     args = parser.parse_args()
 
     # --- Configuration ---
-    LIDAR_SIZE = 270
-    STACK_SIZE = 5
+    LIDAR_SIZE = 180
+    STACK_SIZE = 2
     TOTAL_TIMESTEPS = 1_000_000
 
     # OPTIMIZATION: Use CPU for MLP (Faster than GPU latency for small nets)
-    device = "cpu" 
+    device = "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
     print(f"🖥️  Training Device: {device.upper()} (Optimized for Low Latency)")
 
     # 1. Create Environment with Monitor Wrapper

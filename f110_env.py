@@ -92,7 +92,7 @@ class F110UnityEnv(gym.Env):
             if time.time() - start_wait > 1.0:
                 print("⚠️ Sync Warning: Unity heartbeat lost.")
                 break
-            time.sleep(0.0005) # Tiny sleep to prevent 100% CPU core usage
+            time.sleep(0.0001) # Tiny sleep to prevent 100% CPU core usage
 
         # 4. Process Data
         obs = self._get_obs(car)
@@ -117,7 +117,7 @@ class F110UnityEnv(gym.Env):
         # Ensure bridge is connected before requesting reset
         while not self.bridge.connected:
             print("⏳ Waiting for Unity connection...")
-            time.sleep(0.5)
+            time.sleep(1.0)
 
         # Send Reset signal
         self.bridge.send_control(100.0, 100.0)

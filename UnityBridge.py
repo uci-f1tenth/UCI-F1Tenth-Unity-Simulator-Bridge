@@ -80,10 +80,10 @@ class UnityTCPBridge:
                 self._listen_loop()
                 
             except ConnectionRefusedError:
-                time.sleep(1) # Unity probably isn't running, retry
+                time.sleep(1.0) # Unity probably isn't running, retry
             except Exception as e:
                 print(f"❌ Connection Error: {e}")
-                time.sleep(1)
+                time.sleep(1.0) # Wait before retrying
             finally:
                 self.connected = False
                 if self.sock:
@@ -178,27 +178,6 @@ class UnityTCPBridge:
         except Exception as e:
             print(f"❌ Send Error: {e}")
             self.connected = False
-
-    def step(self, steering: float, throttle: float, timeout=1.0) -> TelemetryData:
-        """
-        Sends command and blocks until the next physics frame arrives.
-        """
-        if not self.connected:
-            # Wait a bit if not connected yet to avoid crashing the training loop
-            time.sleep(0.1)
-            return self.get_telemetry()
-
-        prev_id = self.last_sequence_id
-        self.send_control(steering, throttle)
-        
-        start_t = time.time()
-        while self.last_sequence_id == prev_id:
-            if time.time() - start_t > timeout:
-                print("⏲️ Step Timeout: Unity didn't respond.")
-                break
-            time.sleep(0.001)
-            
-        return self.get_telemetry()
 
     def stop(self):
         self.running = False

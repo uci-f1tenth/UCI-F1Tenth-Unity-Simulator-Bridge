@@ -16,8 +16,8 @@ def main():
 
     # --- Configuration ---
     LIDAR_SIZE = 180
-    STACK_SIZE = 2
-    TOTAL_TIMESTEPS = 1_000_000
+    STACK_SIZE = 3
+    TOTAL_TIMESTEPS = 1_000_000_000
 
     # OPTIMIZATION: Use CPU for MLP (Faster than GPU latency for small nets)
     device = "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
@@ -48,17 +48,38 @@ def main():
             "MlpPolicy",
             env,
             device=device,
-            policy_kwargs=dict(net_arch=[512, 512]),
-            learning_rate=3e-4,     
-            n_steps=4096,           
-            batch_size=128,         # Smaller batch is often better on CPU
-            n_epochs=10,
-            gamma=0.995,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,
-            use_sde=True,           # Smoother steering
-            sde_sample_freq=4,
+            policy_kwargs=dict(net_arch=[256, 256]),
+            
+            # 1. Faster Updates: Increase batch_size to 512 or 1024.
+            # At 700 SPS, your CPU can handle larger chunks of math at once.
+            # This reduces the number of updates per cycle from 1024 to 128 (8192/1024 * 16).
+            batch_size=1024, 
+            n_epochs=10,             # Reduced from 16 to prevent "overfitting" to a single buffer
+            
+            # 2. Learning Rate: 3e-4 is okay, but with a larger batch, 
+            # a slightly lower, stable rate prevents the "plateau crash."
+            learning_rate=2e-4,     
+            
+            # 3. Buffer Size: 8192 is good. 
+            # It represents about 11-15 seconds of driving per update.
+            n_steps=8192,           
+
+            # 4. Long-Term Vision:
+            gamma=0.998,            # Keep this! It forces the car to care about the far future.
+            gae_lambda=0.98,        # Increased from 0.95 to smooth out the "advantage" 
+                                    # estimates over that long gamma horizon.
+
+            # 5. Exploration:
+            # 0.05 is quite high. If the car looks "jittery" or "drunk," 
+            # drop this to 0.01 or 0.02.
+            ent_coef=0.02,          
+            clip_range=0.2, 
+            
+            # 6. Smoothness:
+            use_sde=True,
+            sde_sample_freq=4,      # Increased from 2. Noise changes every 4 steps 
+                                    # leads to smoother, more consistent turns.
+            
             verbose=1,
             tensorboard_log="./f110_tensorboard/"
         )

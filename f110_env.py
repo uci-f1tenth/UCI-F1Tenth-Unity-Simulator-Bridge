@@ -21,7 +21,8 @@ class F110UnityEnv(gym.Env):
 
         # --- Observation Space ---
         # For scalars like inf, np.float32() is the way to go
-        self.obs_size = self.lidar_size + 8 + 9
+        #self.obs_size = self.lidar_size + 7 + 9
+        self.obs_size = self.lidar_size + 5
         self.observation_space = spaces.Box(
             low=np.float32(-np.inf), 
             high=np.float32(np.inf), 
@@ -48,26 +49,26 @@ class F110UnityEnv(gym.Env):
         else:
             lidar = raw_lidar
 
-        # 2. Scalars (8)
+        # 2. Scalars (7)
         scalars = np.array([
             car.fixedDeltaTime,
-            car.speedMS / 20.0,
+            car.speedMS,
             car.steering,
             car.steeringAngleRad,
-            car.throttle,
-            (car.wheelTicks % 1000) / 1000.0,
-            car.currentWheelRPM / 10000.0,
-            car.reward 
+            car.throttle
+            #(car.wheelTicks % 10000) / 10000.0,
+            #car.currentWheelRPM / 10000.0
         ], dtype=np.float32)
 
         # 3. Vectors (9)
-        vectors = np.array([
-            *car.imuAngle,
-            *car.linAccel,
-            *car.angAccel
-        ], dtype=np.float32)
+        #vectors = np.array([
+        #    *car.imuAngle,
+        #    *car.linAccel,
+        #    *car.angAccel
+        #], dtype=np.float32)
 
-        return np.concatenate([lidar, scalars, vectors])
+        #return np.concatenate([lidar, scalars, vectors])
+        return np.concatenate([lidar, scalars])
 
     def step(self, action):
         steering, throttle = action

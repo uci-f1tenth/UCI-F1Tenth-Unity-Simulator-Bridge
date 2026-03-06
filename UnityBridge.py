@@ -2,9 +2,10 @@ import socket
 import struct
 import time
 import threading
+import numpy as np
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Tuple, Optional
+from typing import Tuple
 
 class VehicleStatus(IntEnum):
     OK = 0
@@ -12,175 +13,163 @@ class VehicleStatus(IntEnum):
 
 @dataclass
 class TelemetryData:
+    """
+    Optimized Data Class.
+    Vectors are now stored as numpy arrays for faster processing,
+    but the names match your specific requested units.
+    """
     sequenceId: int = 0
     timeSinceStart: float = 0.0
     fixedDeltaTime: float = 0.0
     speedMS: float = 0.0
     steering: float = 0.0
-    steeringAngleDeg: float = 0.0
+    steeringAngleDeg: float = 0.0  # MATCHED: Degrees
     throttle: float = 0.0
     wheelTicks: int = 0
     currentWheelRPM: float = 0.0
-    imuAngleDeg: Tuple[float, float, float] = (0, 0, 0)
-    linAccel: Tuple[float, float, float] = (0, 0, 0)
-    angAccelDeg: Tuple[float, float, float] = (0, 0, 0)
+    
+    # vectors stored as numpy arrays for speed, names matched to your request
+    imuAngleDeg: np.ndarray = field(default_factory=lambda: np.zeros(3)) 
+    linAccel: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    angAccelDeg: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    
     reward: float = 0.0
     lapCount: int = 0
     isCrashed: VehicleStatus = VehicleStatus.OK
     lidarCount: int = 0
-    lidarRanges: list[float] = field(default_factory=list)
+    lidarRanges: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 class UnityTCPBridge:
     def __init__(self, ip="127.0.0.1", port=5005, lidar_max_dist=20.0):
         self.ip = ip
         self.port = port
-        self.lidar_max_dist = lidar_max_dist
+        self.lidar_scale = lidar_max_dist / 65535.0
         
         # --- FORMAT STRING (88 Bytes) ---
-        # Same structure as before
-        self.header_format = '<I6fi f9f f3i' 
+        # Matches your specific C# struct layout
+        self.header_format = '<I6fif9ff3i' 
         self.header_size = struct.calcsize(self.header_format)
         
+        # Optimization: Pre-allocate reusable buffer
+        self._header_buffer = bytearray(self.header_size)
+        
         # State Tracking
-        self.latest_data = TelemetryData()
+        self.data = TelemetryData() # Reuse this single instance
         self.last_sequence_id = -1
         self.running = False
         self.connected = False
         self._lock = threading.Lock()
-        
         self.sock = None
 
     def start(self):
-        """Starts the connection and the listener thread."""
         self.running = True
         self.thread = threading.Thread(target=self._connection_loop, daemon=True)
         self.thread.start()
         print(f"🔄 Bridge starting... Connecting to {self.ip}:{self.port}")
 
     def _connection_loop(self):
-        """
-        Main Loop: Tries to connect, then runs the listen loop.
-        If disconnected, it goes back to trying to connect.
-        """
         while self.running:
             try:
-                # 1. Create TCP Socket
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) # Critical for latency
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 
-                # 2. Try Connect
-                print(f"⏳ Attempting to connect to Unity at {self.ip}:{self.port}...")
+                print(f"⏳ Connecting to {self.ip}:{self.port}...")
                 self.sock.connect((self.ip, self.port))
                 
                 self.connected = True
-                self.last_sequence_id = -1 # Reset sequence tracking on new connection
+                self.last_sequence_id = -1
                 print("✅ Connected to Unity!")
                 
-                # 3. Enter Receive Loop
                 self._listen_loop()
                 
-            except ConnectionRefusedError:
-                time.sleep(1.0) # Unity probably isn't running, retry
-            except Exception as e:
-                print(f"❌ Connection Error: {e}")
-                time.sleep(1.0) # Wait before retrying
+            except (ConnectionRefusedError, OSError):
+                time.sleep(1.0)
             finally:
                 self.connected = False
-                if self.sock:
-                    self.sock.close()
+                if self.sock: self.sock.close()
 
-    def _recv_exact(self, n):
-        """Helper to read exactly n bytes from the TCP stream."""
-        data = bytearray()
-        while len(data) < n:
-            packet = self.sock.recv(n - len(data))
-            if not packet:
+    def _recv_into(self, buffer, n):
+        """Zero-copy read directly into pre-allocated memory."""
+        view = memoryview(buffer)[:n]
+        while n > 0:
+            n_read = self.sock.recv_into(view, n)
+            if n_read == 0:
                 raise ConnectionError("Socket closed")
-            data.extend(packet)
-        return data
+            view = view[n_read:]
+            n -= n_read
 
     def _listen_loop(self):
-        """Reads data from the open socket."""
+        # Cache lookups for speed
+        unpack = struct.unpack
+        fmt = self.header_format
+        header_buf = self._header_buffer
+        lidar_scale = self.lidar_scale
+        
         while self.running and self.connected:
             try:
-                # 1. Read Fixed Header (88 bytes)
-                # We use _recv_exact because TCP might give us partial packets
-                header_data = self._recv_exact(self.header_size)
-                
-                # Unpack
-                h = struct.unpack(self.header_format, header_data)
+                # 1. Read Header (Zero Copy)
+                self._recv_into(header_buf, self.header_size)
+                h = unpack(fmt, header_buf)
                 
                 # 2. Sequence Check
                 seq_id = h[0]
-                if self.last_sequence_id != -1:
-                    if seq_id <= self.last_sequence_id:
-                        continue
-                    # Only warn if we've already received at least one packet this session
-                    if seq_id > self.last_sequence_id + 1:
-                        print(f"⚠️ Gap detected...")
-                else:
-                    print(f"📈 First packet received. Syncing Sequence at: {seq_id}")
-
+                if seq_id <= self.last_sequence_id and self.last_sequence_id != -1:
+                    continue 
                 self.last_sequence_id = seq_id
 
                 # 3. Read Lidar Payload
                 lidar_n = h[21]
-                ranges = []
-                
+                lidar_ranges = np.empty(0)
+
                 if lidar_n > 0:
-                    lidar_bytes_needed = lidar_n * 2
-                    lidar_data = self._recv_exact(lidar_bytes_needed)
+                    bytes_needed = lidar_n * 2
+                    lidar_data = self.sock.recv(bytes_needed, socket.MSG_WAITALL)
                     
-                    raw_lidar = struct.unpack(f'<{lidar_n}H', lidar_data)
-                    ranges = [(v / 65535.0) * self.lidar_max_dist for v in raw_lidar]
+                    # Optimization: Numpy Vectorization (C-Speed)
+                    raw = np.frombuffer(lidar_data, dtype=np.uint16)
+                    lidar_ranges = raw.astype(np.float32) * lidar_scale
 
-                # 4. Update State
+                # 4. Update State (In Place)
                 with self._lock:
-                    self.latest_data = TelemetryData(
-                        sequenceId       = h[0],
-                        timeSinceStart   = h[1],
-                        fixedDeltaTime   = h[2],
-                        speedMS          = h[3],
-                        steering         = h[4],
-                        steeringAngleDeg = h[5],
-                        throttle         = h[6],
-                        wheelTicks       = h[7],
-                        currentWheelRPM  = h[8],
-                        imuAngleDeg         = (h[9], h[10], h[11]),
-                        linAccel         = (h[12], h[13], h[14]),
-                        angAccelDeg      = (h[15], h[16], h[17]),
-                        reward           = h[18],
-                        lapCount         = h[19],
-                        isCrashed        = VehicleStatus(h[20]),
-                        lidarCount       = lidar_n,
-                        lidarRanges      = ranges
-                    )
+                    d = self.data
+                    d.sequenceId       = h[0]
+                    d.timeSinceStart   = h[1]
+                    d.fixedDeltaTime   = h[2]
+                    d.speedMS          = h[3]
+                    d.steering         = h[4]
+                    d.steeringAngleDeg = h[5]  # MATCHED
+                    d.throttle         = h[6]
+                    d.wheelTicks       = h[7]
+                    d.currentWheelRPM  = h[8]
+                    
+                    # Direct slice assignment (Fastest way to update vectors)
+                    d.imuAngleDeg[:]   = h[9:12] # MATCHED
+                    d.linAccel[:]      = h[12:15]
+                    d.angAccelDeg[:]   = h[15:18] # MATCHED
+                    
+                    d.reward           = h[18]
+                    d.lapCount         = h[19]
+                    d.isCrashed        = VehicleStatus(h[20])
+                    d.lidarCount       = lidar_n
+                    d.lidarRanges      = lidar_ranges
 
-            except (ConnectionError, struct.error, OSError):
-                print("🔌 Disconnected from Unity.")
-                break # Exit to outer loop to reconnect
+            except (ConnectionError, struct.error, OSError) as e:
+                print(f"🔌 Connection Lost: {e}")
+                break
             except Exception as e:
-                print(f"🚨 Parse Error: {e}")
+                print(f"🚨 Unexpected Error: {e}")
                 break
 
     def get_telemetry(self) -> TelemetryData:
-        with self._lock:
-            return self.latest_data
+        return self.data
 
     def send_control(self, steering: float, throttle: float):
-        if not self.connected or not self.sock:
-            return
-            
+        if not self.connected or not self.sock: return
         try:
-            # 8 bytes (2 floats)
-            pkt = struct.pack('<ff', float(steering), float(throttle))
-            self.sock.sendall(pkt) # sendall ensures all bytes go out
-        except Exception as e:
-            print(f"❌ Send Error: {e}")
+            self.sock.sendall(struct.pack('<ff', float(steering), float(throttle)))
+        except OSError:
             self.connected = False
 
     def stop(self):
         self.running = False
-        if self.sock:
-            self.sock.close()
-        print("🛑 Bridge stopped.")
+        if self.sock: self.sock.close()

@@ -12,7 +12,6 @@ class F110UnityEnv(gym.Env):
         self.bridge = UnityTCPBridge(port=5005)
         
         # --- Action Space ---
-        # Using dtype=np.float32 inside the array prevents the casting warning
         self.action_space = spaces.Box(
             low=np.array([-1.0, -1.0], dtype=np.float32), 
             high=np.array([1.0, 1.0], dtype=np.float32), 
@@ -20,15 +19,18 @@ class F110UnityEnv(gym.Env):
         )
 
         # --- Observation Space ---
-        # For scalars like inf, np.float32() is the way to go
-        #self.obs_size = self.lidar_size + 7 + 9
-        self.obs_size = self.lidar_size + 5
+        self.obs_size = self.lidar_size + 7 + 9
         self.observation_space = spaces.Box(
-            low=np.float32(-np.inf), 
-            high=np.float32(np.inf), 
+            low=-np.inf, high=np.inf, 
             shape=(self.obs_size,), 
             dtype=np.float32
         )
+
+        # --- OPTIMIZATION: Zero-Copy Buffer ---
+        self.obs_buffer = np.zeros(self.obs_size, dtype=np.float32)
+        self.lidar_view = self.obs_buffer[0 : self.lidar_size]
+        self.scalar_view = self.obs_buffer[self.lidar_size : self.lidar_size + 7]
+        self.vector_view = self.obs_buffer[self.lidar_size + 7 :]
 
         # --- UPS Tracking Variables ---
         self.ups_counter = 0
@@ -36,104 +38,94 @@ class F110UnityEnv(gym.Env):
 
         self.bridge.start()
 
-    def _get_obs(self, car):
-        # 1. Lidar Processing with Empty Data Guard
-        raw_lidar = np.array(car.lidarRanges, dtype=np.float32)
-        
-        # If Unity hasn't sent data yet, return zeros so the NN doesn't crash
-        if len(raw_lidar) == 0:
-            lidar = np.zeros(self.lidar_size, dtype=np.float32)
-        elif len(raw_lidar) != self.lidar_size:
-            original_indices = np.linspace(0, len(raw_lidar) - 1, self.lidar_size)
-            lidar = np.interp(original_indices, np.arange(len(raw_lidar)), raw_lidar).astype(np.float32)
+    def _update_obs_buffer(self, car):
+        """Writes data directly into the pre-allocated numpy buffer."""
+        # 1. Lidar
+        if len(car.lidarRanges) == self.lidar_size:
+            np.copyto(self.lidar_view, car.lidarRanges)
         else:
-            lidar = raw_lidar
+            self.lidar_view[:] = 0.0
 
-        # 2. Scalars (7)
-        scalars = np.array([
-            car.fixedDeltaTime,
-            car.speedMS,
-            car.steering,
-            car.steeringAngleDeg,
-            car.throttle
-            #(car.wheelTicks % 10000) / 10000.0,
-            #car.currentWheelRPM / 10000.0
-        ], dtype=np.float32)
+        # 2. Scalars
+        self.scalar_view[0] = car.fixedDeltaTime
+        self.scalar_view[1] = car.speedMS
+        self.scalar_view[2] = car.steering
+        self.scalar_view[3] = car.steeringAngleDeg
+        self.scalar_view[4] = car.throttle
+        self.scalar_view[5] = (car.wheelTicks % 10000) / 10000.0
+        self.scalar_view[6] = car.currentWheelRPM / 10000.0
 
-        # 3. Vectors (9)
-        #vectors = np.array([
-        #    *car.imuAngleDeg,
-        #    *car.linAccel,
-        #    *car.angAccelDeg
-        #], dtype=np.float32)
+        # 3. Vectors
+        self.vector_view[0:3] = car.imuAngleDeg
+        self.vector_view[3:6] = car.linAccel
+        self.vector_view[6:9] = car.angAccelDeg
 
-        #return np.concatenate([lidar, scalars, vectors])
-        return np.concatenate([lidar, scalars])
+        return self.obs_buffer
 
     def step(self, action):
+        # Wait for connection to start training
+        while not self.bridge.connected:
+            time.sleep(1.0)
+
         steering, throttle = action
         
-        # 1. Capture ID before sending command
-        # (Wait for connection first if needed)
-        while not self.bridge.connected:
-             time.sleep(1.0)
+        # 1. Capture Current Sequence ID
+        start_seq_id = self.bridge.data.sequenceId
 
-        last_telemetry = self.bridge.get_telemetry()
-        
-        # 2. Send control
+        # 2. Send Control
         self.bridge.send_control(steering, throttle)
 
-        # 3. Synchronous Wait (Wait for Unity to complete a physics frame)
-        start_wait = time.time()
+        # 3. Sync Wait (Spin-lock)
+        timeout = time.time() + 1.0
         while True:
-            car = self.bridge.get_telemetry()
-            if car.sequenceId > last_telemetry.sequenceId:
-                break 
+            current_seq_id = self.bridge.data.sequenceId
             
-            if time.time() - start_wait > 1.0:
-                print("⚠️ Sync Warning: Unity heartbeat lost.")
+            if current_seq_id > start_seq_id:
                 break
-            time.sleep(0.0001) # Tiny sleep to prevent 100% CPU core usage
+            
+            if time.time() > timeout:
+                break
+                
+            time.sleep(0) # Yield CPU 
 
-        # 4. Process Data
-        obs = self._get_obs(car)
+        # 4. Get Reference to updated data
+        car = self.bridge.data
+        
+        # 5. Populate Buffer
+        obs = self._update_obs_buffer(car)
         reward = float(car.reward)
         terminated = (car.isCrashed == VehicleStatus.CRASHED)
         
-        # --- 5. UPS Tracking Logic ---
+        # --- 6. UPS Tracking Logic ---
         self.ups_counter += 1
         now = time.time()
         if now - self.last_status_time >= 1.0:
             ups = self.ups_counter / (now - self.last_status_time)
-            # Use raw_lidar length for debugging or just fixed 1080 concept
             print(f"📊 [UPS: {ups:5.1f}] | Seq: {car.sequenceId:6d} | Speed: {car.speedMS:5.2f} m/s | Reward: {reward:6.2f}")
             self.ups_counter = 0
             self.last_status_time = now
-
+        
         return obs, reward, terminated, False, {}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        # Ensure bridge is connected before requesting reset
         while not self.bridge.connected:
-            print("⏳ Waiting for Unity connection...")
-            time.sleep(1.0)
+            time.sleep(0.5)
 
-        # Send Reset signal
         self.bridge.send_control(100.0, 100.0)
         
-        # CRITICAL: Wait until Unity actually sends a valid packet with Lidar data
-        car = self.bridge.get_telemetry()
         timeout = time.time() + 5.0
-        while len(car.lidarRanges) == 0:
-            car = self.bridge.get_telemetry()
-            if time.time() > timeout:
-                print("⚠️ Reset Timeout: Unity is connected but not sending Lidar data.")
+        while True:
+            if self.bridge.data.lidarCount > 0:
                 break
-            time.sleep(0.1)
+            if time.time() > timeout:
+                print("⚠️ Reset Timeout: No Lidar data received.")
+                break
+            time.sleep(0.5)
 
-        return self._get_obs(car), {}
+        obs = self._update_obs_buffer(self.bridge.data)
+        return obs, {}
 
     def close(self):
         self.bridge.stop()

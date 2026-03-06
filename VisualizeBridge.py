@@ -34,7 +34,7 @@ def main():
     ax_lidar.set_theta_zero_location("N")  
     ax_lidar.set_theta_direction(-1)       
     
-    ax_lidar.set_ylim(0, bridge.lidar_max_dist) # Max range
+    ax_lidar.set_ylim(0, bridge.lidar_scale * 65535.0) # Max range
     
     # Initialize empty plot line
     lidar_line, = ax_lidar.plot([], [], '.', markersize=2, color='cyan', alpha=0.6)

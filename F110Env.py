@@ -54,7 +54,7 @@ class F110UnityEnv(gym.Env):
             car.fixedDeltaTime,
             car.speedMS,
             car.steering,
-            car.steeringAngleRad,
+            car.steeringAngleDeg,
             car.throttle
             #(car.wheelTicks % 10000) / 10000.0,
             #car.currentWheelRPM / 10000.0
@@ -62,9 +62,9 @@ class F110UnityEnv(gym.Env):
 
         # 3. Vectors (9)
         #vectors = np.array([
-        #    *car.imuAngle,
+        #    *car.imuAngleDeg,
         #    *car.linAccel,
-        #    *car.angAccel
+        #    *car.angAccelDeg
         #], dtype=np.float32)
 
         #return np.concatenate([lidar, scalars, vectors])

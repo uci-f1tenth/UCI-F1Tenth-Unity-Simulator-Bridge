@@ -6,7 +6,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 from stable_baselines3.common.monitor import Monitor  # <--- Essential for TensorBoard
 from stable_baselines3.common.callbacks import CheckpointCallback
-from f110_env import F110UnityEnv
+from F110Env import F110UnityEnv
 
 def main():
     parser = argparse.ArgumentParser(description="Train F110 Unity RL Agent")

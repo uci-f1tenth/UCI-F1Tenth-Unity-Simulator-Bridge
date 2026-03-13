@@ -15,8 +15,8 @@ def main():
     args = parser.parse_args()
 
     # --- Configuration ---
-    LIDAR_SIZE = 270
-    STACK_SIZE = 3
+    LIDAR_SIZE = 180
+    STACK_SIZE = 2
     TOTAL_TIMESTEPS = 50_000_000  # Increased for meaningful results
 
     # OPTIMIZATION 1: CPU is often faster for small MLPs (avoids GPU PCIe latency)
@@ -74,18 +74,18 @@ def main():
             tensorboard_log="./f110_tensorboard/",
             
             # --- Hyperparameter Optimizations ---
-            learning_rate=1e-4,     # Standard stable rate
-            n_steps=2048,           # Shorter buffer than 8192 (updates more often)
-            batch_size=256,         # Smaller batch = more updates per epoch
-            n_epochs=15,            # 10 passes over the data
-            gamma=0.99,             # High discount factor (care about crashing 5s later)
-            gae_lambda=0.92,        # Bias-variance trade-off
-            clip_range=0.2,
-            ent_coef=0.005,         # Lower entropy (racing requires precision, not randomness)
-            max_grad_norm=0.5,      # Prevent gradient spikes
+            learning_rate=3e-5,
+            n_steps=8192,
+            batch_size=256,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.92,
+            clip_range=0.1,
+            ent_coef=0.00001,
+            max_grad_norm=0.5,
             policy_kwargs=policy_kwargs,
-            use_sde=True,           # State Dependent Exploration (Smooths steering)
-            sde_sample_freq=8       # Resample noise every 4 steps (smooth control)
+            use_sde=True,
+            sde_sample_freq=16
         )
 
     # --- Training Loop ---

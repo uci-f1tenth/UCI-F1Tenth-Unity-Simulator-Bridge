@@ -1,72 +1,114 @@
 import time
 import numpy as np
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from MAUnityBridge import MATCPTunnel, MAVehicleStatus # Ensure names match your saved bridge file
+
+from MAUnityBridge import MATCPTunnel
+
+# --- Disable Matplotlib Default Hotkeys ---
+# This prevents 's' from opening the save menu, and stops arrows/WASD from panning the camera.
+conflicting_keys = ['w', 'a', 's', 'd', 'up', 'down', 'left', 'right']
+
+for key, bindings in mpl.rcParams.items():
+    if key.startswith('keymap.'):
+        # Keep only the bindings that do NOT conflict with our controls
+        mpl.rcParams[key] = [b for b in bindings if b not in conflicting_keys]
 
 # --- Configuration ---
 PORT = 5005
-LIDAR_FOV = 270        # Degrees
-LIDAR_MODE = "CCW"     # Options: "CCW" (Standard) or "CW" (Inverted)
-                       # Must match the 'Scan Direction' setting in Unity Inspector!
 
-# --- Global State for Visualization ---
+# --- Global State for Visualization & Control ---
 selected_agent_index = 0
 total_agents = 0
 
+active_keys = {
+    'w': False,
+    's': False,
+    'a': False,
+    'd': False
+}
+
+bridge = None
+
 def on_key_press(event):
-    """Handles keyboard input to switch between agents dynamically."""
-    global selected_agent_index, total_agents
-    if total_agents == 0:
-        return
-        
-    if event.key == 'up':
+    global selected_agent_index, total_agents, active_keys
+    
+    if event.key == 'up' and total_agents > 0:
         selected_agent_index = (selected_agent_index + 1) % total_agents
-        print(f"🎯 Switched view to Agent [{selected_agent_index}]")
-    elif event.key == 'down':
+        print(f"🎯 Controlling Agent [{selected_agent_index}]")
+    elif event.key == 'down' and total_agents > 0:
         selected_agent_index = (selected_agent_index - 1) % total_agents
-        print(f"🎯 Switched view to Agent [{selected_agent_index}]")
+        print(f"🎯 Controlling Agent [{selected_agent_index}]")
+        
+    if event.key in active_keys:
+        active_keys[event.key] = True
+
+def on_key_release(event):
+    global active_keys
+    if event.key in active_keys:
+        active_keys[event.key] = False
+
+def handle_batched_controls():
+    """
+    Constructs batched Numpy arrays for Steering and Throttle for ALL agents.
+    Only the actively selected agent receives WASD inputs. Others receive 0.0.
+    """
+    if not bridge or not bridge.connected or total_agents == 0:
+        return
+
+    # Initialize empty action arrays for the entire batch
+    steer_batch = np.zeros(total_agents, dtype=np.float32)
+    throttle_batch = np.zeros(total_agents, dtype=np.float32)
+
+    # Calculate inputs for the selected agent
+    t_val = 0.0
+    s_val = 0.0
+
+    if active_keys['w']: t_val = 1.0
+    if active_keys['s']: t_val = -1.0 # Reverse/Brake
+    if active_keys['a']: s_val = -1.0 # Left
+    if active_keys['d']: s_val = 1.0  # Right
+
+    # Assign inputs only to the agent we are currently watching
+    steer_batch[selected_agent_index] = s_val
+    throttle_batch[selected_agent_index] = t_val
+
+    # Broadcast batched commands to Unity C# loop
+    bridge.send_action_batch(steer_batch, throttle_batch)
 
 def main():
-    global selected_agent_index, total_agents
+    global selected_agent_index, total_agents, bridge
     
     print(f"🔌 Connecting to Multi-Agent Unity Bridge on port {PORT}...")
     bridge = MATCPTunnel(port=PORT)
     bridge.start()
 
-    # Wait for connection
     while not bridge.connected:
-        print("⏳ Waiting for Unity client to connect...")
+        print("⏳ Waiting to connect to Unity Server...")
         time.sleep(1.0)
     print("✅ Connected! Starting Visualization...")
-    print("⌨️  Use UP/DOWN arrow keys on the plot window to cycle through agents.")
+    print("⌨️  Use UP/DOWN arrows to switch active agent.")
+    print("🎮  Use W/A/S/D to drive the selected agent!")
 
-    # --- Setup Matplotlib Figure ---
+    # --- GUI Setup ---
     plt.style.use('dark_background')
     fig = plt.figure(figsize=(14, 7))
-    fig.canvas.manager.set_window_title("MA Telemetry Visualizer")
+    fig.canvas.manager.set_window_title("RL Telemetry Visualizer & Remote")
     
-    # Register keyboard event listener
     fig.canvas.mpl_connect('key_press_event', on_key_press)
+    fig.canvas.mpl_connect('key_release_event', on_key_release)
 
-    # 1. Lidar Plot (Polar)
+    # Lidar Subplot
     ax_lidar = fig.add_subplot(1, 2, 1, projection='polar')
-    ax_lidar.set_title(f"Lidar Scan ({LIDAR_MODE})", color='white', pad=20)
-    
-    # Setup Orientation: 0 is North (Front), Angles go Clockwise
     ax_lidar.set_theta_zero_location("N")  
     ax_lidar.set_theta_direction(-1)       
-    
-    ax_lidar.set_ylim(0, bridge.lidar_scale * 65535.0) # Max range
-    
-    # Initialize empty plot line
     lidar_line, = ax_lidar.plot([], [], '.', markersize=2, color='cyan', alpha=0.6)
 
-    # 2. Text Data Panel
+    # Text Subplot
     ax_text = fig.add_subplot(1, 2, 2)
     ax_text.axis('off')
     
-    # Template for text data
     text_template = (
         "ENVIRONMENT INFO\n"
         "--------------------------------\n"
@@ -75,7 +117,7 @@ def main():
         "Sim Time:       {time:.2f} s\n"
         "Sim FPS:        {fps:.1f} ({dt:.4f}s)\n\n"
         
-        "AGENT [{agent_id}] STATE\n"
+        "AGENT [{agent_id}] STATE (Controlling)\n"
         "--------------------------------\n"
         "Speed:          {speed:.2f} m/s\n"
         "Throttle:       {thr:.2f} %\n"
@@ -87,15 +129,16 @@ def main():
         "--------------------------------\n"
         "RPM:            {rpm:.1f}\n"
         "Torque:         {trq:.2f} Nm\n"
-        "IMU Angles:     {imu} deg\n"
+        "Wheel Ticks:    {ticks}\n"
+        "IMU Angles:      {imu} deg\n"
         "Lin Accel:      {lin} m/s^2\n"
         "Ang Accel:      {ang} deg/s^2\n\n"
         
         "AGENT [{agent_id}] LIDAR DATA\n"
         "--------------------------------\n"
+        "FOV Range:      {l_min_ang} to {l_max_ang} deg\n"
         "Scan Mode:      {l_mode}\n"
         "Point Count:    {lidar_count}\n"
-        "1st Point Dist: {lidar_dist}\n"
         "Reward:         {rew:.4f}"
     )
     
@@ -103,14 +146,13 @@ def main():
                              transform=ax_text.transAxes, 
                              fontsize=11, family='monospace', va='top', color='lime')
 
-    # --- Precompute Angles ---
-    min_rad = np.radians(-LIDAR_FOV / 2)
-    max_rad = np.radians(LIDAR_FOV / 2)
-
-    # --- Update Function ---
+    # --- Render Loop ---
     def update(frame):
         global selected_agent_index, total_agents
         
+        # Broadcast batched controls every frame
+        handle_batched_controls()
+
         if not bridge.connected:
             info_text.set_text("⚠️ Bridge Disconnected")
             return [lidar_line, info_text]
@@ -118,30 +160,34 @@ def main():
         data = bridge.get_telemetry()
         total_agents = data.numberOfAgents
         
-        # Guard clause: Wait until data is populated
         if total_agents == 0 or len(data.speedMS) != total_agents:
             return [lidar_line, info_text]
 
-        # Ensure index doesn't go out of bounds if agent count drops mid-sim
         if selected_agent_index >= total_agents:
             selected_agent_index = 0
 
-        # Shortcut for currently selected agent index
         i = selected_agent_index
 
-        # 1. Update Lidar for Selected Agent
+        if data.lidarMaxRange > 0:
+            ax_lidar.set_ylim(0, data.lidarMaxRange)
+            
+        scan_dir_str = "CW" if data.lidarScanDirection == 1 else "CCW"
+        ax_lidar.set_title(f"Lidar Scan ({scan_dir_str} | Max: {data.lidarMaxRange}m)", color='white', pad=20)
+
+        # Update Lidar map (Using corrected CW/CCW mapping)
         if data.lidarRanges.shape[0] > 0 and data.lidarRanges.shape[1] > 0:
             ranges = data.lidarRanges[i]
             
-            # Determine angle distribution based on Mode
-            if LIDAR_MODE == "CW":
-                angles = np.linspace(min_rad, max_rad, len(ranges))
+            min_rad = np.radians(data.lidarMinAngleDeg)
+            max_rad = np.radians(data.lidarMaxAngleDeg)
+            
+            if scan_dir_str == "CCW":
+                angles = np.linspace(max_rad, min_rad, len(ranges)) 
             else:
-                angles = np.linspace(max_rad, min_rad, len(ranges))
+                angles = np.linspace(min_rad, max_rad, len(ranges))
             
             lidar_line.set_data(angles, ranges)
 
-        # 2. Update Text Data for Selected Agent
         is_crashed = bool(data.isCrashed[i])
         status_str = "CRASHED!" if is_crashed else "OK"
         fps = 1.0 / data.fixedDeltaTime if data.fixedDeltaTime > 0 else 0
@@ -160,28 +206,29 @@ def main():
             crashed=status_str,
             rpm=data.currentWheelRPM[i],
             trq=data.appliedWheelTorque[i],
+            ticks=data.wheelTicks[i],
             imu=tuple(round(x, 2) for x in data.imuAngleDeg[i]),
             lin=tuple(round(x, 2) for x in data.linAccelMS[i]),
             ang=tuple(round(x, 2) for x in data.angAccelDeg[i]),
+            l_min_ang=data.lidarMinAngleDeg,
+            l_max_ang=data.lidarMaxAngleDeg,
             rew=data.reward[i],
             lidar_count=data.lidarRanges.shape[1] if data.lidarRanges.size > 0 else 0,
-            lidar_dist=data.lidarRanges[i][0],
-            l_mode=LIDAR_MODE
+            l_mode=scan_dir_str
         )
         
         info_text.set_text(display_str)
         
-        # Color code crash status
         if is_crashed:
             info_text.set_color('red')
-            lidar_line.set_color('red') # Make lidar red when crashed too
+            lidar_line.set_color('red') 
         else:
             info_text.set_color('lime')
             lidar_line.set_color('cyan')
 
         return [lidar_line, info_text]
 
-    # Run Animation (50FPS refresh rate)
+    # Run Animation
     ani = FuncAnimation(fig, update, interval=20, blit=True, cache_frame_data=False)
     
     try:
@@ -190,7 +237,8 @@ def main():
         pass
     finally:
         print("🛑 Closing Bridge...")
-        bridge.stop()
+        if bridge:
+            bridge.stop()
 
 if __name__ == "__main__":
     main()

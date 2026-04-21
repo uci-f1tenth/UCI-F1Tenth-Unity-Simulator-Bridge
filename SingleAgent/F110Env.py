@@ -113,7 +113,7 @@ class F110UnityEnv(gym.Env):
         while not self.bridge.connected:
             time.sleep(0.5)
 
-        self.bridge.send_control(100.0, 100.0)
+        #self.bridge.send_control(100.0, 100.0)
         
         timeout = time.time() + 5.0
         while True:

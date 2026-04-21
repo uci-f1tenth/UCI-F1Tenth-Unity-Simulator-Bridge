@@ -227,6 +227,7 @@ class MATCPTunnel:
                 seq_id = g_data[0]
                 if seq_id <= self.last_sequence_id and self.last_sequence_id != -1: 
                     continue 
+                
                 self.last_sequence_id = seq_id
 
                 num_agents = g_data[3]

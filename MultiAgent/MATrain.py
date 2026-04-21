@@ -5,7 +5,7 @@ import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
-from MA_F110VecEnv import MA_F110VecEnv
+from MAF110VecEnv import MAF110VecEnv
 
 def main():
     parser = argparse.ArgumentParser(description="Train Multi-Agent F110 Unity RL")
@@ -14,19 +14,20 @@ def main():
     args = parser.parse_args()
 
     # --- Configuration ---
-    LIDAR_SIZE = 270
+    LIDAR_SIZE = 180
     STACK_SIZE = 2
     TOTAL_TIMESTEPS = 50_000_000 
 
     # For large multi-agent batches, GPU becomes beneficial. 
     # Switch to "cpu" only if running less than 8 agents.
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
 
     print(f"🖥️  Training Device: {device.upper()}")
 
     # --- Environment Setup ---
-    # MA_F110VecEnv is ALREADY a VecEnv. Do not wrap in DummyVecEnv.
-    env = MA_F110VecEnv(lidar_size=LIDAR_SIZE)
+    # MAF110VecEnv is ALREADY a VecEnv. Do not wrap in DummyVecEnv.
+    env = MAF110VecEnv(lidar_size=LIDAR_SIZE)
     
     # Apply Frame Stacking
     env = VecFrameStack(env, n_stack=STACK_SIZE)

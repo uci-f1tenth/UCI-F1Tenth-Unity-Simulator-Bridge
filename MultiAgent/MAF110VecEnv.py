@@ -4,19 +4,19 @@ from gymnasium import spaces
 from stable_baselines3.common.vec_env import VecEnv
 from MAUnityBridge import MATCPTunnel  # Assuming your bridge is saved here
 
-class MA_F110VecEnv(VecEnv):
+class MAF110VecEnv(VecEnv):
     def __init__(self, lidar_size=270, port=5005):
         self.lidar_size = lidar_size
         self.bridge = MATCPTunnel(port=port)
         self.bridge.start()
 
         # 1. Wait for connection and first packet to get agent count
-        print("[MA_F110VecEnv] Waiting for Unity connection...")
+        print("[MAF110VecEnv] Waiting for Unity connection...")
         while not self.bridge.connected or self.bridge.get_telemetry().numberOfAgents == 0:
             time.sleep(0.5)
 
         self.num_agents = self.bridge.get_telemetry().numberOfAgents
-        print(f"[MA_F110VecEnv] Connected! Detected {self.num_agents} agents.")
+        print(f"[MAF110VecEnv] Connected! Detected {self.num_agents} agents.")
 
         # 2. Define Spaces
         action_space = spaces.Box(

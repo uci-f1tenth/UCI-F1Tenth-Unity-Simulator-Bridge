@@ -4,8 +4,40 @@ import torch
 import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize, VecMonitor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback, CallbackList
 from MAF110VecEnv import MAF110VecEnv
+from typing import Callable
+
+class EntropyDecayCallback(BaseCallback):
+    def __init__(self, initial_ent_coef=0.001, final_ent_coef=0.0, total_timesteps=50_000_000, verbose=0):
+        super().__init__(verbose)
+        self.initial_ent_coef = initial_ent_coef
+        self.final_ent_coef = final_ent_coef
+        self.total_timesteps = total_timesteps
+
+    def _on_step(self) -> bool:
+        # Calculate the fraction of training remaining
+        fraction = 1.0 - (self.num_timesteps / self.total_timesteps)
+        fraction = max(0.0, fraction) # Ensure it doesn't go below 0
+        
+        # Calculate the new entropy coefficient
+        current_ent_coef = fraction * (self.initial_ent_coef - self.final_ent_coef) + self.final_ent_coef
+        
+        # Inject it directly into the algorithm
+        self.model.ent_coef = current_ent_coef
+        
+        # Log it to TensorBoard so you can track the decay!
+        self.logger.record("config/ent_coef", current_ent_coef)
+        return True
+
+def linear_schedule(initial_value: float, final_value: float = 0.0) -> Callable[[float], float]:
+    """
+    Returns a function that computes a linear decay.
+    progress_remaining goes from 1.0 (start) to 0.0 (end).
+    """
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * (initial_value - final_value) + final_value
+    return func
 
 def main():
     parser = argparse.ArgumentParser(description="Train Multi-Agent F110 Unity RL")
@@ -49,6 +81,14 @@ def main():
         name_prefix="ma_f110_model"
     )
 
+    entropy_callback = EntropyDecayCallback(
+        initial_ent_coef=0.001,
+        final_ent_coef=0.0,
+        total_timesteps=TOTAL_TIMESTEPS
+    )
+
+    callback_list = CallbackList([checkpoint_callback, entropy_callback])
+
     # --- Model Setup ---
     policy_kwargs = dict(
         activation_fn=nn.Tanh,
@@ -72,18 +112,20 @@ def main():
             device=device,
             verbose=1,
             tensorboard_log="./ma_f110_tensorboard/",
-            learning_rate=3e-4,     
-            n_steps=2048,           # ~20 in-game seconds of driving per agent
-            batch_size=8192,        # Slices the 106k buffer into ~13 chunks per epoch
+            n_steps=2048,           
+            batch_size=8192,        
             n_epochs=10,            
-            gamma=0.995,            # CRITICAL: Tuned for 100 Hz simulation time
+            gamma=0.995,            
             gae_lambda=0.95,        
-            clip_range=0.2,
-            ent_coef=0.001,         
             max_grad_norm=0.5,
             policy_kwargs=policy_kwargs,
             use_sde=True,
-            sde_sample_freq=20      # Holds noise for 0.2 in-game seconds
+            sde_sample_freq=20,
+            
+            # --- THE FIX ---
+            learning_rate=linear_schedule(3e-4, 1e-5),  # This works perfectly
+            clip_range=linear_schedule(0.2, 0.05),      # This works perfectly
+            ent_coef=0.001                              # MUST be a float!
         )
 
     print(f"🏎️  Model Input Shape: {env.observation_space.shape}")
@@ -92,7 +134,7 @@ def main():
     try:
         model.learn(
             total_timesteps=TOTAL_TIMESTEPS,
-            callback=checkpoint_callback,
+            callback=callback_list,
             tb_log_name="PPO_MA_F110",
             reset_num_timesteps=False
         )

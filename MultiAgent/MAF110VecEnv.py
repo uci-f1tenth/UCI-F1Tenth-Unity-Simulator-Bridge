@@ -61,8 +61,8 @@ class MAF110VecEnv(VecEnv):
             hub.steering,
             hub.steeringAngleDeg,
             hub.throttle,
-            (hub.wheelTicks % 10000) / 10000.0,
-            hub.currentWheelRPM / 10000.0
+            (hub.wheelTicks % 1000000) / 1000000.0,
+            hub.currentWheelRPM / 100000.0
         ])
 
         # Stack 2D vector arrays [N, 9]

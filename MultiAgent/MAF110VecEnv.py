@@ -13,7 +13,7 @@ class MAF110VecEnv(VecEnv):
         # 1. Wait for connection and first packet to get agent count
         print("[MAF110VecEnv] Waiting for Unity connection...")
         while not self.bridge.connected or self.bridge.get_telemetry().numberOfAgents == 0:
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         self.num_agents = self.bridge.get_telemetry().numberOfAgents
         print(f"[MAF110VecEnv] Connected! Detected {self.num_agents} agents.")
@@ -91,7 +91,7 @@ class MAF110VecEnv(VecEnv):
                 break
             if time.time() > timeout:
                 break
-            time.sleep(0) # Yield CPU
+            time.sleep(0.001) # Yield CPU
 
         obs = self._get_batched_obs(hub)
         rewards = hub.reward
@@ -142,7 +142,7 @@ class MAF110VecEnv(VecEnv):
                 print("⚠️ [Warning] Reset timed out waiting for Unity Manual Step.")
                 break
                 
-            time.sleep(0.01) # Yield CPU slightly to prevent thread locking
+            time.sleep(0.001) # Yield CPU slightly to prevent thread locking
 
         return self._get_batched_obs(hub)
 

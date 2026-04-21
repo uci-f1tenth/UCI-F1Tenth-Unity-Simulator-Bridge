@@ -3,7 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
+from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize, VecMonitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 from MAF110VecEnv import MAF110VecEnv
 
@@ -21,13 +21,15 @@ def main():
     # For large multi-agent batches, GPU becomes beneficial. 
     # Switch to "cpu" only if running less than 8 agents.
     # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    device = "cuda"
 
     print(f"🖥️  Training Device: {device.upper()}")
 
     # --- Environment Setup ---
     # MAF110VecEnv is ALREADY a VecEnv. Do not wrap in DummyVecEnv.
     env = MAF110VecEnv(lidar_size=LIDAR_SIZE)
+
+    env = VecMonitor(env)
     
     # Apply Frame Stacking
     env = VecFrameStack(env, n_stack=STACK_SIZE)
@@ -70,18 +72,18 @@ def main():
             device=device,
             verbose=1,
             tensorboard_log="./ma_f110_tensorboard/",
-            learning_rate=3e-5,
-            n_steps=2048,           # Steps per agent before update
-            batch_size=1024,        # Size of mini-batches during PPO update
-            n_epochs=10,
-            gamma=0.99,
-            gae_lambda=0.92,
-            clip_range=0.1,
-            ent_coef=0.00001,
+            learning_rate=3e-4,     
+            n_steps=2048,           # ~20 in-game seconds of driving per agent
+            batch_size=8192,        # Slices the 106k buffer into ~13 chunks per epoch
+            n_epochs=10,            
+            gamma=0.995,            # CRITICAL: Tuned for 100 Hz simulation time
+            gae_lambda=0.95,        
+            clip_range=0.2,
+            ent_coef=0.001,         
             max_grad_norm=0.5,
             policy_kwargs=policy_kwargs,
             use_sde=True,
-            sde_sample_freq=16
+            sde_sample_freq=20      # Holds noise for 0.2 in-game seconds
         )
 
     print(f"🏎️  Model Input Shape: {env.observation_space.shape}")

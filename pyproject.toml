@@ -1,7 +1,7 @@
 [project]
-name = "udp-python"
+name = "uci-f1tenth-unity-simulator-bridge"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python bridge, controllers and RL training for the UCI F1Tenth Unity Simulator"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

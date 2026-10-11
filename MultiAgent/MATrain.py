@@ -52,8 +52,7 @@ def main():
 
     # For large multi-agent batches, GPU becomes beneficial. 
     # Switch to "cpu" only if running less than 8 agents.
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cuda"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"🖥️  Training Device: {device.upper()}")
 
